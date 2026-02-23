@@ -1,0 +1,84 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@200;400;800&display=swap');
+
+:root {
+  --bg: #050505;
+  --primary: #00f3ff;
+  --secondary: #7000ff;
+  --glass: rgba(255, 255, 255, 0.03);
+  --border: rgba(255, 255, 255, 0.08);
+}
+
+body {
+  background-color: var(--bg);
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  overflow-x: hidden;
+  color: white;
+}
+
+/* --- BACKGROUND FX --- */
+.bg-glow {
+  position: fixed;
+  top: 0; left: 50%;
+  transform: translateX(-50%);
+  width: 100vw; height: 100vh;
+  background: radial-gradient(circle at 50% -20%, var(--secondary), transparent 50%);
+  opacity: 0.15;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.grid-overlay {
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), 
+                    linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+  background-size: 60px 60px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* --- WORKOUT CARD --- */
+.workout-card {
+  background: var(--glass);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 2rem;
+  display: flex;
+  gap: 2rem;
+  transition: 0.4s cubic-bezier(0.23, 1, 0.32, 1);
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+}
+
+.workout-card:hover {
+  transform: scale(1.015);
+  background: color-mix(in srgb, var(--subgroup-color) 3%, var(--glass));
+  border-color: var(--subgroup-color);
+  box-shadow: 0 0 40px color-mix(in srgb, var(--subgroup-color) 10%, transparent);
+}
+
+.card-accent { 
+  width: 4px; 
+  border-radius: 10px; 
+  background-color: var(--subgroup-color);
+  box-shadow: 0 0 15px var(--subgroup-color);
+}
+
+/* --- INPUT AREA --- */
+.input-glass {
+  background: rgba(10, 10, 10, 0.8);
+  backdrop-filter: blur(20px);
+  border-top: 1px solid var(--border);
+}
+
+/* --- ANIMATIONS --- */
+.animate-enter {
+  animation: slideUp 0.6s ease forwards;
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}

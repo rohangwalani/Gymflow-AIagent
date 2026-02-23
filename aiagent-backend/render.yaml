@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: aiagent
+    runtime: docker # <--- This forces the change
+    envVars:
+      - key: GROQ_KEY
+        sync: false
+      - key: INTERNAL_API_KEY
+        value: gymflow-secret-connect-2026

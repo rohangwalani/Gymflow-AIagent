@@ -1,0 +1,16 @@
+name: GymFlow 24/7 Heartbeat
+
+on:
+  schedule:
+    - cron: '*/14 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Spring Backend
+        run: curl -sSf https://your-spring-app.onrender.com/health || echo "Backend ping failed"
+      
+      - name: Ping Python AI Agent
+        run: curl -sSf https://your-python-agent.onrender.com/ || echo "AI Agent ping failed"
