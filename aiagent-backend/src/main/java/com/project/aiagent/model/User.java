@@ -13,6 +13,16 @@ public class User {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    // --- Authentication Data (NEW) ---
+    @Column(nullable = false, unique = true)
+    private String email;
+
+    @Column(nullable = false)
+    private String password;
+
+    @Column(nullable = false)
+    private boolean enabled = false; // For email verification
+
     // --- Identity ---
     private String name;
     private int age;
@@ -36,6 +46,6 @@ public class User {
     private int targetCalories; // Calculated TDEE
 
     // Relationship: One User has many Daily Stats entries
-    @OneToMany(mappedBy = "user", cascade = CascadeType.ALL)
-    private List<DailyStats> dailyStatsLogs;
+//    @OneToMany(mappedBy = "user", cascade = CascadeType.ALL)
+//    private List<DailyStats> dailyStatsLogs;
 }
