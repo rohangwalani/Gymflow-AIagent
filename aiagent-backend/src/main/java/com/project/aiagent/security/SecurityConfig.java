@@ -29,9 +29,17 @@ public class SecurityConfig {
         http
                 .csrf(csrf -> csrf.disable())
                 .cors(Customizer.withDefaults())
+                // ADD THESE TWO LINES TO KILL THE GENERATED PASSWORD WARNING:
+                .formLogin(form -> form.disable())
+                .httpBasic(basic -> basic.disable())
+
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
+                        // 1. Explicitly allow the cron job to ping the health check instantly
+                        .requestMatchers("/health").permitAll()
+                        // 2. Protect all AI Agent endpoints
                         .requestMatchers("/api/v1/agent/**").authenticated()
+                        // 3. Allow other basic requests
                         .anyRequest().permitAll()
                 )
                 .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class);
@@ -39,15 +47,15 @@ public class SecurityConfig {
         return http.build();
     }
 
-    // --- ADDED: This allows Vercel to talk to this backend securely ---
+    // --- Allows Vercel to talk to this backend securely ---
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
 
-        // Replace the second string with your actual Vercel URL
+        // Remember to update this with your final Vercel URL if it changes
         configuration.setAllowedOrigins(List.of(
                 "http://localhost:5173",
-                "https://gymflow-frontend.vercel.app"
+                "https://gym-flow-ashy-three.vercel.app"
         ));
 
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
