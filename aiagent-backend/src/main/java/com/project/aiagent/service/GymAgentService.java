@@ -8,6 +8,8 @@ import org.springframework.web.client.RestClient;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Service
@@ -19,7 +21,6 @@ public class GymAgentService {
     @Value("${groq.api.key}")
     private String groqApiKey;
 
-    // MEMORY STORE
     private final Map<String, List<Map<String, String>>> userMemory = new ConcurrentHashMap<>();
     private final Map<String, String> userActiveFocus = new ConcurrentHashMap<>();
 
@@ -29,236 +30,143 @@ public class GymAgentService {
     }
 
     public String getCoaching(String userId, String userMessage) {
-
-        // 1. INIT MEMORY
         userMemory.putIfAbsent(userId, new ArrayList<>());
         List<Map<String, String>> history = userMemory.get(userId);
 
-        // 2. GUARDRAIL: DETECT OFF-TOPIC INPUT (The Fix)
+        // 1. GUARDRAIL: OFF-TOPIC
         if (isOffTopic(userMessage)) {
-            // Clear context so we don't get stuck in a weird loop
             clearUserHistory(userId);
-            return """
-                {
-                  "coach_message": "I am a Gym Coach. I cannot help with shopping, relationships, or general advice. Let's get back to training!",
-                  "warning_level": "RED",
-                  "routine": []
-                }
-                """;
+            return "{\"coach_message\": \"I am a Gym Coach. Let's get back to training!\", \"warning_level\": \"RED\", \"routine\": []}";
         }
 
-        // 3. DETECT INTENT
+        // 2. DETECT INTENT & QUANTITY
         boolean isReplacement = userMessage.toLowerCase().contains("replace") ||
                 userMessage.toLowerCase().contains("change") ||
                 userMessage.toLowerCase().contains("swap");
 
-        // 4. DETECT TRAINING FOCUS
-        String detectedFocus = detectTrainingFocus(userMessage);
-        if (detectedFocus != null) {
-            userActiveFocus.put(userId, detectedFocus);
+        int requestedCount = extractNumber(userMessage);
+        if (userMessage.toLowerCase().contains("each") && requestedCount > 0) {
+            requestedCount = requestedCount * 2;
         }
 
-        // 5. SMART SEARCH
-        String lastAiResponse = getLastAiResponse(history);
-        String searchContext = userMessage + " " + lastAiResponse;
+        String quantityRule = (requestedCount > 0)
+                ? "You MUST provide EXACTLY " + requestedCount + " exercises. No more, no less."
+                : "Use 4-6 exercises.";
+
+        // 3. DETECT TRAINING FOCUS
+        String detectedFocus = detectTrainingFocus(userMessage);
+        if (detectedFocus != null) userActiveFocus.put(userId, detectedFocus);
         String currentFocus = userActiveFocus.get(userId);
 
-        List<String> searchKeywords = extractKeywords(searchContext, currentFocus);
+        // 4. EFFICIENT DATABASE SEARCH
+        String lastAiResponse = getLastAiResponse(history);
+        List<String> keywords = extractKeywords(userMessage + " " + lastAiResponse, currentFocus);
 
-        // Fallback: Only use previous context if the user is NOT asking for something completely new
-        if (searchKeywords.isEmpty() && currentFocus != null && !isReplacement) {
-            searchKeywords.addAll(getFallbackKeywords(currentFocus));
-        }
-
-        // 6. FETCH DATABASE
         String dbContext = "NO EXERCISES FOUND";
-        if (!searchKeywords.isEmpty()) {
-            List<Exercise> availableExercises = new ArrayList<>();
-            for (String keyword : searchKeywords) {
-                availableExercises.addAll(exerciseRepository.searchExercises(keyword));
-            }
+        if (!keywords.isEmpty()) {
+            List<Exercise> availableExercises = exerciseRepository.findByMultipleKeywords(
+                    keywords.stream().map(String::toLowerCase).collect(Collectors.toList()),
+                    userMessage.toLowerCase()
+            );
+
             if (!availableExercises.isEmpty()) {
                 dbContext = availableExercises.stream()
                         .distinct()
-                        .map(e -> {
-                            boolean isIso = Boolean.TRUE.equals(e.getIsIsolation());
-                            String type = isIso ? "Isolation" : "Compound";
-                            String target = (e.getMuscleSubGroup() != null) ? e.getMuscleSubGroup() : "General";
-                            return e.getName() + " [Target: " + target + "] [Type: " + type + "]";
-                        })
+                        .map(e -> e.getName() + " [Target: " + e.getMuscleSubGroup() + "] [Type: " + (Boolean.TRUE.equals(e.getIsIsolation()) ? "Isolation" : "Compound") + "]")
                         .collect(Collectors.joining(", "));
             }
         }
 
-        // 7. DYNAMIC SYSTEM PROMPT
-        String jsonSchema = """
-            {
-              "coach_message": "String",
-              "warning_level": "String",
-              "routine": [ { "exercise": "String", "sets": "String", "reps": "String", "notes": "String" } ]
-            }
-            """;
+        // 5. PROMPT GENERATION
+        String jsonSchema = "{\"coach_message\": \"String\", \"warning_level\": \"String\", \"routine\": [ { \"exercise\": \"String\", \"sets\": \"String\", \"reps\": \"String\", \"notes\": \"String\" } ]}";
 
-        String systemPrompt;
+        String systemPrompt = isReplacement ?
+                "You are a SURGICAL replacement engine. Swap: \"%s\". DB: %s. Rule: Return EXACTLY ONE exercise card. JSON: %s".formatted(userMessage, dbContext, jsonSchema) :
+                "You are GymFlow, an elite Coach. DB: %s. FOCUS: %s. RULES: 1. %s 2. %s 3. If focus is ARMS, balance Bicep/Tricep evenly. 4. Keep coach_message brief. JSON: %s"
+                        .formatted(dbContext, currentFocus != null ? currentFocus : "GENERAL", getLogicInstruction(currentFocus), quantityRule, jsonSchema);
 
-        if (isReplacement) {
-            // --- SNIPER MODE ---
-            systemPrompt = """
-                You are a SURGICAL replacement engine.
-                User wants to swap: "%s"
-                **DATABASE:** %s
-                **STRICT RULES:**
-                1. Find ONE valid substitute.
-                2. Do NOT return the full workout list.
-                3. The 'routine' array must contain EXACTLY ONE exercise.
-                **OUTPUT JSON:** %s
-                """.formatted(userMessage, dbContext, jsonSchema);
-        } else {
-            // --- GENERATOR MODE ---
-            String logicInstruction = getLogicInstruction(currentFocus);
-            systemPrompt = """
-                You are GymFlow, an elite Sports & Strength Coach.
-                **DATABASE:** %s
-                **FOCUS:** %s
-                **RULES:**
-                %s
-                2. Use 4-6 exercises.
-                3. **GUARDRAIL:** If the user asks about shopping, weather, or non-fitness topics, return an empty routine and a polite refusal.
-                **OUTPUT JSON:** %s
-                """.formatted(dbContext, currentFocus != null ? currentFocus : "GENERAL", logicInstruction, jsonSchema);
-        }
-
-        // 8. CALL API
+        // 6. CALL API
         try {
-            var requestBody = Map.of(
-                    "model", "llama-3.1-8b-instant",
-                    "messages", buildMessages(systemPrompt, isReplacement ? Collections.emptyList() : history, userMessage),
-                    "response_format", Map.of("type", "json_object")
-            );
-
             var response = restClient.post()
                     .header("Authorization", "Bearer " + groqApiKey)
-                    .header("Content-Type", "application/json")
-                    .body(requestBody)
-                    .retrieve()
-                    .body(Map.class);
+                    .body(Map.of(
+                            "model", "llama-3.1-8b-instant",
+                            "messages", buildMessages(systemPrompt, isReplacement ? Collections.emptyList() : history, userMessage),
+                            "response_format", Map.of("type", "json_object")
+                    ))
+                    .retrieve().body(Map.class);
 
-            var choices = (List<Map<String, Object>>) response.get("choices");
-            var messageObj = (Map<String, Object>) choices.get(0).get("message");
-            String aiResponse = (String) messageObj.get("content");
+// 1. Get the list of choices
+            List<Map<String, Object>> choices = (List<Map<String, Object>>) response.get("choices");
 
+// 2. Get the first choice map
+            Map<String, Object> firstChoice = choices.get(0);
+
+// 3. Get the message map from that choice
+            Map<String, Object> message = (Map<String, Object>) firstChoice.get("message");
+
+
+            String aiResponse = (String) message.get("content");
             history.add(Map.of("role", "user", "content", userMessage));
             history.add(Map.of("role", "assistant", "content", aiResponse));
             if (history.size() > 10) history.subList(0, 2).clear();
-
             return aiResponse;
-
         } catch (Exception e) {
             return "{\"coach_message\": \"System Error: " + e.getMessage() + "\", \"warning_level\": \"RED\", \"routine\": []}";
         }
     }
 
-    // --- INTELLIGENCE METHODS ---
+    private int extractNumber(String msg) {
+        Matcher m = Pattern.compile("\\d+").matcher(msg);
+        return m.find() ? Integer.parseInt(m.group()) : 0;
+    }
 
     private boolean isOffTopic(String msg) {
-        msg = msg.toLowerCase();
-        List<String> forbidden = List.of(
-                "buy", "sell", "price", "cost", "wallet", "bag", "purse", "fashion", "shopping", // Shopping
-                "relationship", "dating", "love", "divorce", "kiss", "marry",                    // Relationships
-                "weather", "news", "politics", "movie", "song", "game",                          // General
-                "code", "java", "python", "debug"                                                // Coding
-        );
-
-        // Exception: "Punching bag" or "Sand bag" is allowed
-        if (msg.contains("punching bag") || msg.contains("heavy bag") || msg.contains("sand bag")) return false;
-
-        return forbidden.stream().anyMatch(msg::contains);
+        String lower = msg.toLowerCase();
+        if (lower.contains("punching bag") || lower.contains("heavy bag")) return false;
+        return List.of("buy", "price", "dating", "weather", "politics", "code", "java").stream().anyMatch(lower::contains);
     }
 
     private String detectTrainingFocus(String msg) {
-        msg = msg.toLowerCase();
-
-        // 1. SPORTS
-        if (msg.contains("football") || msg.contains("soccer") || msg.contains("running") || msg.contains("sprint")) return "SPORT_RUNNING_BASED";
-        if (msg.contains("basketball") || msg.contains("volleyball") || msg.contains("jump")) return "SPORT_JUMPING_BASED";
-        if (msg.contains("tennis") || msg.contains("cricket") || msg.contains("baseball") || msg.contains("golf") || msg.contains("throw")) return "SPORT_ROTATIONAL";
-        if (msg.contains("swim")) return "SPORT_SWIMMING";
-        if (msg.contains("fight") || msg.contains("boxing") || msg.contains("mma")) return "SPORT_COMBAT";
-
-        // 2. FUNCTIONAL / LIFE
-        if (msg.contains("posture") || msg.contains("sit") || msg.contains("desk")) return "FUNC_POSTURE";
-        if (msg.contains("carry") || msg.contains("grocery") || msg.contains("grip")) return "FUNC_STRENGTH";
-        if (msg.contains("stamina") || msg.contains("endurance") || msg.contains("sex")) return "CARDIO"; // Mapped user request
-
-        // 3. MOBILITY / RECOVERY
-        if (msg.contains("yoga") || msg.contains("stretch") || msg.contains("flexible") || msg.contains("mobility")) return "MOBILITY";
-
-        // 4. GENERAL GYM
-        if (msg.contains("full") || msg.contains("whole") || msg.contains("mix")) return "FULL_BODY";
-        if (msg.contains("upper")) return "UPPER_BODY";
-        if (msg.contains("lower")) return "LOWER_BODY";
-        if (msg.contains("leg") || msg.contains("squat")) return "LEGS";
-        if (msg.contains("chest") || msg.contains("bench")) return "CHEST";
-        if (msg.contains("back") || msg.contains("row")) return "BACK";
-        if (msg.contains("shoulder")) return "SHOULDERS";
-        if (msg.contains("arm") || msg.contains("bicep") || msg.contains("tricep")) return "ARMS";
-        if (msg.contains("abs") || msg.contains("core")) return "ABS";
-        if (msg.contains("cardio") || msg.contains("stamina")) return "CARDIO";
-
+        String lower = msg.toLowerCase();
+        if (lower.contains("arm") || lower.contains("bicep") || lower.contains("tricep")) return "ARMS";
+        if (lower.contains("leg") || lower.contains("squat")) return "LEGS";
+        if (lower.contains("chest")) return "CHEST";
+        if (lower.contains("back")) return "BACK";
+        if (lower.contains("shoulder")) return "SHOULDERS";
+        if (lower.contains("abs") || lower.contains("core")) return "ABS";
+        if (lower.contains("full") || lower.contains("whole")) return "FULL_BODY";
         return null;
     }
 
     private List<String> extractKeywords(String msg, String focus) {
-        msg = msg.toLowerCase();
         Set<String> keywords = new HashSet<>();
-
+        if (focus != null) {
+            keywords.add(focus);
+            keywords.addAll(getFallbackKeywords(focus));
+        }
         if (msg.contains("squat")) keywords.add("SQUAT");
-        if (msg.contains("deadlift")) keywords.add("DEADLIFT");
         if (msg.contains("bench")) keywords.add("BENCH");
-
+        if (msg.contains("curl")) keywords.add("CURL");
         return new ArrayList<>(keywords);
     }
 
     private List<String> getFallbackKeywords(String focus) {
-        if (focus == null) return new ArrayList<>();
         switch (focus) {
-            case "SPORT_RUNNING_BASED": return List.of("LEGS", "CARDIO", "ABS", "LUNGE");
-            case "SPORT_JUMPING_BASED": return List.of("LEGS", "CALVES", "SHOULDERS", "SQUAT");
-            case "SPORT_ROTATIONAL": return List.of("ABS", "SHOULDERS", "BACK", "ARMS");
-            case "SPORT_SWIMMING": return List.of("BACK", "SHOULDERS", "ABS", "LATS");
-            case "SPORT_COMBAT": return List.of("SHOULDERS", "ABS", "CARDIO", "HIIT");
-            case "FUNC_POSTURE": return List.of("BACK", "ABS", "GLUTES", "FACE PULL");
-            case "FUNC_STRENGTH": return List.of("FOREARMS", "BACK", "LEGS", "DEADLIFT");
-            case "MOBILITY": return List.of("ABS", "BACK", "LEGS");
+            case "ARMS": return List.of("BICEPS", "TRICEPS", "FOREARMS");
+            case "LEGS": return List.of("QUADS", "HAMSTRINGS", "CALVES");
             case "FULL_BODY": return List.of("CHEST", "BACK", "LEGS", "SHOULDERS");
-            case "UPPER_BODY": return List.of("CHEST", "BACK", "SHOULDERS", "ARMS");
-            case "LOWER_BODY": return List.of("LEGS", "ABS");
-            case "CARDIO": return List.of("CARDIO", "LEGS", "ABS");
             default: return List.of(focus);
         }
     }
 
     private String getLogicInstruction(String focus) {
-        if (focus == null) return "1. Create a logical workout.";
-        return switch (focus) {
-            case "SPORT_RUNNING_BASED" -> "1. Design for SPEED & ENDURANCE. Mix Unilateral Legs + Core + Cardio.";
-            case "SPORT_JUMPING_BASED" -> "1. Design for EXPLOSIVE POWER. Heavy Squats + Calf work + Shoulder stability.";
-            case "SPORT_ROTATIONAL" -> "1. Design for ROTATIONAL POWER. Core (Woodchoppers) + Shoulders + Lats.";
-            case "SPORT_SWIMMING" -> "1. Design for UPPER BODY ENDURANCE. Lats + Shoulders + Core stability.";
-            case "FUNC_POSTURE" -> "1. Design for POSTURE CORRECTION. Focus on Rear Delts, Upper Back, and Core.";
-            case "MOBILITY" -> "1. Design for FLEXIBILITY. Focus on full range of motion exercises.";
-            case "FULL_BODY" -> "1. Full Body: Pick 1 Chest, 1 Back, 1 Leg, 1 Shoulder, 1 Core.";
-            case "CARDIO" -> "1. Endurance Focus: Mix Cardio machines with high-rep bodyweight moves.";
-            default -> "1. Create a logical hypertrophy workout (Heavy -> Light).";
-        };
+        if (focus == null) return "Create a logical workout.";
+        return "Focus: " + focus + ". Ensure a mix of heavy compound and isolation moves.";
     }
 
     private String getLastAiResponse(List<Map<String, String>> history) {
-        if (history.isEmpty()) return "";
-        for (int i = history.size() - 1; i >= 0; i--) {
-            if ("assistant".equals(history.get(i).get("role"))) return history.get(i).get("content");
-        }
-        return "";
+        return history.stream().filter(m -> "assistant".equals(m.get("role"))).map(m -> m.get("content")).reduce((first, second) -> second).orElse("");
     }
 
     private List<Map<String, String>> buildMessages(String system, List<Map<String, String>> history, String userMsg) {
