@@ -20,8 +20,9 @@ public class User {
     @Column(nullable=true)
     private String password;
 
-    @Column(nullable = false)
-    private boolean enabled = false; // For email verification
+    // --- Authentication Data (FIXED) ---
+    @Column(name = "enabled", nullable = false, columnDefinition = "boolean default true")
+    private boolean enabled = true;
 
     // --- Identity ---
     private String name;
