@@ -77,36 +77,69 @@ public class GymAgentService {
             }
         }
 
-        // 5. PROMPT GENERATION
+        // 5. HYPER-FACTUAL PROMPT GENERATION (Zero-Hallucination Design)
         String jsonSchema = "{\"coach_message\": \"String\", \"warning_level\": \"String\", \"routine\": [ { \"exercise\": \"String\", \"sets\": \"String\", \"reps\": \"String\", \"notes\": \"String\" } ]}";
 
-        String systemPrompt = isReplacement ?
-                "You are a SURGICAL replacement engine. Swap: \"%s\". DB: %s. Rule: Return EXACTLY ONE exercise card. JSON: %s".formatted(userMessage, dbContext, jsonSchema) :
-                "You are GymFlow, an elite Coach. DB: %s. FOCUS: %s. RULES: 1. %s 2. %s 3. If focus is ARMS, balance Bicep/Tricep evenly. 4. Keep coach_message brief. JSON: %s"
-                        .formatted(dbContext, currentFocus != null ? currentFocus : "GENERAL", getLogicInstruction(currentFocus), quantityRule, jsonSchema);
+        String systemPrompt;
+        if (isReplacement) {
+            systemPrompt = """
+                You are GymFlow's SURGICAL Workout Modification Engine. Your job is to process an exercise replacement with zero errors.
+                
+                USER REPLACEMENT REQUEST: "%s"
+                AVAILABLE DATABASE EXERCISES: [%s]
+                
+                CRITICAL OPERATIONAL RULES:
+                1. CONTEXT AUDIT: Examine the chat history to see the current active workout routine.
+                2. ANATOMICAL MATCHING: The replacement exercise MUST target the exact same muscle group or function as the exercise being removed, unless the user explicitly stated otherwise.
+                3. ANTI-DUPLICATION RULE: Review all active exercises in the chat history. You are strictly FORBIDDEN from choosing an exercise that is already present in the current routine.
+                4. OUTPUT CONSTRAINT: Return EXACTLY ONE exercise object inside the 'routine' array.
+                5. STICK TO THE DATABASE: Only use exercises provided in the AVAILABLE DATABASE string above.
+                
+                OUTPUT FORMAT:
+                You must output ONLY a valid JSON object matching this schema. No conversational prose before or after the JSON.
+                JSON Schema: %s
+                """.formatted(userMessage, dbContext, jsonSchema);
+        } else {
+            systemPrompt = """
+                You are GymFlow, an elite, hyper-accurate Sports Science AI Coach. You have a zero-tolerance policy for anatomical errors, duplicates, or logical sequencing flaws.
+                
+                AVAILABLE DATABASE EXERCISES: [%s]
+                CURRENT TARGET TRAINING FOCUS: [%s]
+                
+                CRITICAL OPERATIONAL RULES:
+                1. ANATOMICAL ACCURACY: You must maintain perfect muscle target mapping (e.g., Lateral Raises = Medial/Side Delts, Close Grip Bench/Overhead Extensions = Triceps, Bench/Flyes = Chest). Never hallucinate or switch target muscle profiles.
+                2. ANTI-DUPLICATION RULE: Review the chat history. Never suggest an exercise that is already active in the user's routine.
+                3. WORKOUT STRUCTURE: %s
+                4. QUANTITY CONSTRAINT: %s
+                5. STICK TO THE DATABASE: Only use exercises provided in the AVAILABLE DATABASE string above. Do not invent new names.
+                6. KEEP IT BRIEF: Keep the 'coach_message' short, motivating, and professional.
+                
+                OUTPUT FORMAT:
+                You must output ONLY a valid JSON object matching this schema. No markdown wraps, no trailing text outside the JSON block.
+                JSON Schema: %s
+                """.formatted(dbContext, currentFocus != null ? currentFocus : "GENERAL", getLogicInstruction(currentFocus), quantityRule, jsonSchema);
+        }
 
-        // 6. CALL API
+        // 6. CALL API (FIXED: History Maintained & Zero Temperature Forced)
         try {
             var response = restClient.post()
                     .header("Authorization", "Bearer " + groqApiKey)
                     .body(Map.of(
                             "model", "llama-3.1-8b-instant",
-                            "messages", buildMessages(systemPrompt, isReplacement ? Collections.emptyList() : history, userMessage),
+                            // History is always maintained now, preventing context amnesia during swaps
+                            "messages", buildMessages(systemPrompt, history, userMessage),
+                            // Temperature 0.0 locks the model out of creative styling, forcing factual schema execution
+                            "temperature", 0.0,
                             "response_format", Map.of("type", "json_object")
                     ))
                     .retrieve().body(Map.class);
 
-// 1. Get the list of choices
             List<Map<String, Object>> choices = (List<Map<String, Object>>) response.get("choices");
-
-// 2. Get the first choice map
             Map<String, Object> firstChoice = choices.get(0);
-
-// 3. Get the message map from that choice
             Map<String, Object> message = (Map<String, Object>) firstChoice.get("message");
 
-
             String aiResponse = (String) message.get("content");
+
             history.add(Map.of("role", "user", "content", userMessage));
             history.add(Map.of("role", "assistant", "content", aiResponse));
             if (history.size() > 10) history.subList(0, 2).clear();
